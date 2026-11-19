@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, Signal
 
 from .scanner import DocumentScanner, to_pil
 from .ocr_engine import OcrEngine
+from .table_ocr import build_table, table_to_lines
 from . import exporters
 
 # 支持的图片后缀
@@ -61,15 +62,29 @@ class Worker(QThread):
         self._emit(100, f"完成，共矫正 {len(saved)} 张")
         return saved
 
+    def _recognize_structured(self, img):
+        """矫正 + OCR + 表格结构识别。返回 (scanned, table, detected, lines)。
+
+        lines 用表格行优先顺序重排，保证 TXT/Word 中文字按表格阅读顺序排列。
+        """
+        import cv2
+        scanned = self.scanner.scan(img, enhance=False)
+        lines = self.ocr.recognize(scanned)
+        gray = cv2.cvtColor(scanned, cv2.COLOR_BGR2GRAY)
+        # 传入 OCR 引擎启用按列识别（避免相邻列文字粘连）
+        table, detected = build_table(gray, lines,
+                                      ocr_engine=self.ocr._get_engine())
+        ordered_lines = table_to_lines(table) if detected else lines
+        return scanned, table, detected, ordered_lines
+
     def _task_ocr(self):
-        """OCR 识别，返回 [(文件名, lines), ...]。"""
+        """OCR 识别，返回 [(文件名, lines), ...]（表格按行优先顺序）。"""
         results = []
         total = len(self.files)
         for i, path in enumerate(self.files):
             self._emit(int(i / total * 100), f"识别文字: {os.path.basename(path)}")
             img = self._read(path)
-            scanned = self.scanner.scan(img, enhance=False)
-            lines = self.ocr.recognize(scanned)
+            _scanned, _table, _detected, lines = self._recognize_structured(img)
             results.append((os.path.basename(path), lines))
         self._emit(100, "文字识别完成")
         return results
@@ -81,8 +96,7 @@ class Worker(QThread):
         for i, path in enumerate(self.files):
             self._emit(int(i / total * 100), f"图片转 Word: {os.path.basename(path)}")
             img = self._read(path)
-            scanned = self.scanner.scan(img, enhance=False)
-            lines = self.ocr.recognize(scanned)
+            scanned, _table, _detected, lines = self._recognize_structured(img)
             scan_path = os.path.join(
                 self.out_dir,
                 os.path.splitext(os.path.basename(path))[0] + "_扫描.png",
@@ -131,7 +145,8 @@ class Worker(QThread):
         return saved
 
     def _task_to_excel(self):
-        """OCR -> 表格 Excel，返回输出路径列表。"""
+        """OCR -> 结构化表格 Excel，返回输出路径列表。"""
+        import cv2
         saved = []
         total = len(self.files)
         for i, path in enumerate(self.files):
@@ -139,11 +154,16 @@ class Worker(QThread):
             img = self._read(path)
             scanned = self.scanner.scan(img, enhance=False)
             lines = self.ocr.recognize(scanned)
+            gray = cv2.cvtColor(scanned, cv2.COLOR_BGR2GRAY)
+            table, detected = build_table(gray, lines,
+                                          ocr_engine=self.ocr._get_engine())
             out = os.path.join(
                 self.out_dir,
                 os.path.splitext(os.path.basename(path))[0] + ".xlsx",
             )
-            exporters.export_xlsx(lines, out)
+            exporters.export_table_xlsx(table, out)
+            self._emit(100, f"已导出 {os.path.basename(out)}"
+                       f"（{'检测到表格线' if detected else '退化模式'}）")
             saved.append(out)
         self._emit(100, f"Excel 导出完成，共 {len(saved)} 个文件")
         return saved

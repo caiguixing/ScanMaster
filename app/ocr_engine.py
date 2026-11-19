@@ -28,7 +28,10 @@ class OcrEngine:
         Returns:
             [{"text": str, "score": float, "box": [[x,y], ...]}, ...]
         """
-        result, _ = self._get_engine()(image)
+        # 降低检测阈值，捕捉手写体和浅色文字（默认 0.5 偏高会漏检）
+        result, _ = self._get_engine()(
+            image, box_thresh=0.35, unclip_ratio=1.8, text_score=0.35
+        )
         lines: List[Dict] = []
         if not result:
             return lines

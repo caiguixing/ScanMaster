@@ -48,15 +48,19 @@ class DocumentScanner:
         return rect
 
     def _enhance(self, img: np.ndarray) -> np.ndarray:
-        """CLAHE 局部对比度增强 + 自适应二值化，得到干净黑白扫描效果。"""
+        """去阴影 + 对比度增强，保留完整笔画（不做激进二值化）。
+
+        用大核高斯估计光照背景并归一化，消除阴影；再做轻度 CLAHE 提升对比度。
+        相比自适应阈值，这种方式不会造成手写笔画断裂和噪点。
+        """
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
-        binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 15,
-        )
-        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        # 估计光照背景（大核模糊），除法归一化去阴影
+        background = cv2.GaussianBlur(gray, (0, 0), sigmaX=25)
+        normalized = cv2.divide(gray, background, scale=255)
+        # 轻度 CLAHE 提升局部对比度
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(normalized)
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
     def scan(self, image: np.ndarray, enhance: bool = True) -> np.ndarray:
         """矫正单张图片。enhance=False 时只做透视矫正不做二值化（利于彩色 OCR）。"""

@@ -104,26 +104,53 @@ def _cluster_rows(lines: List[Dict], tolerance: float = 12.0) -> List[List[Dict]
 
 def export_xlsx(lines: List[Dict], out_path: str,
                 sheet_title: str = "识别表格") -> str:
-    """把 OCR 文本框按坐标重建为表格并导出 Excel。
+    """把 OCR 文本框按坐标重建为表格并导出 Excel（退化方案，无表格线时用）。"""
+    return export_table_xlsx(_cluster_rows_to_table(lines), out_path, sheet_title)
 
-    每行按 x 排序组成单元格；适合规则表格。对于无表格的纯文本，
-    退化为单行单列逐行写入。
+
+def _cluster_rows_to_table(lines: List[Dict]) -> List[List[str]]:
+    rows = _cluster_rows(lines)
+    table = []
+    for row in rows:
+        row.sort(key=lambda l: min(p[0] for p in l["box"]))
+        table.append([line["text"] for line in row])
+    return table
+
+
+def export_table_xlsx(table: List[List[str]], out_path: str,
+                      sheet_title: str = "识别表格") -> str:
+    """把二维数组表格导出为 Excel（保留单元格结构）。
+
+    Args:
+        table: 二维数组，每个元素是一个单元格文本
+        out_path: 输出路径
     """
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_title[:31]
 
-    rows = _cluster_rows(lines)
-    for row in rows:
-        row.sort(key=lambda l: min(p[0] for p in l["box"]))
-        ws.append([line["text"] for line in row])
+    for row in table:
+        ws.append(list(row))
 
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
+    # 首行加粗，全表垂直居中 + 自动换行
+    if ws.max_row >= 1:
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
     for row in ws.iter_rows():
         for cell in row:
             cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    # 设置合理列宽
+    for col_idx in range(1, ws.max_column + 1):
+        max_len = 0
+        for row_idx in range(1, ws.max_row + 1):
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val:
+                max_len = max(max_len, min(len(str(val)), 40))
+        ws.column_dimensions[
+            ws.cell(row=1, column=col_idx).column_letter
+        ].width = max(10, max_len + 2)
 
     wb.save(out_path)
     return out_path
