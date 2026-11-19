@@ -1,6 +1,8 @@
 """预览确认对话框：导出前展示扫描图与识别结果，用户确认后才写文件。"""
 from typing import List
 
+import cv2
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QImage, QFont
 from PySide6.QtWidgets import (
@@ -22,12 +24,27 @@ TASK_TITLES = {
 
 
 def _np_to_pixmap(bgr) -> QPixmap:
-    """OpenCV BGR 数组 -> QPixmap。"""
+    """OpenCV BGR 数组 -> QPixmap。
+
+    关键：QImage 的 (data, w, h) 构造不会拷贝外部缓冲。若直接传
+    bytes/numpy.data，缓冲被回收后会产生悬空指针，导致大图预览时
+    access violation 崩溃（小图因内存未覆写而侥幸不崩）。
+    因此这里用 qimg.copy() 做深拷贝，让 QImage 拥有独立像素数据。
+    """
+    import numpy as np
     if bgr is None:
         return QPixmap()
-    pil = to_pil(bgr)
-    data = pil.tobytes()
-    qimg = QImage(data, pil.width, pil.height, QImage.Format_RGB888)
+    # 统一转成连续 BGR numpy 数组
+    arr = bgr
+    if not isinstance(arr, np.ndarray):
+        arr = np.array(to_pil(arr).convert("RGB"))[:, :, ::-1].copy()
+    if arr.ndim == 2:  # 灰度
+        arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    arr = np.ascontiguousarray(arr)
+    h, w = arr.shape[:2]
+    # BGR -> RGB，copy() 深拷贝保证 QImage 独立持有像素数据
+    rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+    qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(qimg)
 
 
