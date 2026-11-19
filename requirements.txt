@@ -1,0 +1,23 @@
+# ScanMaster 智能文档扫描工具依赖
+# Python 3.10+ (推荐 3.11/3.12)
+
+# GUI
+PySide6>=6.6.0
+
+# 图像处理 / 文档矫正
+opencv-python-headless>=4.9.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# 本地离线 OCR (PaddleOCR 模型的 ONNX 移植版，兼容 Python 3.13，无需 paddlepaddle)
+rapidocr-onnxruntime>=1.2.3
+
+# Office 导出
+python-docx>=1.1.0
+openpyxl>=3.1.0
+
+# PDF 渲染与解析
+PyMuPDF>=1.24.0
+
+# 打包
+pyinstaller>=6.5.0
