@@ -6,11 +6,14 @@
 import os
 
 from PySide6.QtCore import Qt, QFileInfo, QUrl
-from PySide6.QtGui import QPixmap, QDesktopServices, QFont, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import (
+    QPixmap, QDesktopServices, QFont, QDragEnterEvent, QDropEvent,
+    QShortcut, QKeySequence,
+)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QTextEdit, QProgressBar, QFileDialog,
-    QMessageBox, QSplitter, QGroupBox, QAbstractItemView, QStatusBar,
+    QMessageBox, QSplitter, QGroupBox, QAbstractItemView, QStatusBar, QMenu,
 )
 
 from .worker import Worker, export_result, IMAGE_EXTS
@@ -65,11 +68,30 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
 
-        left_layout.addWidget(QLabel("文件列表（可拖拽 / 粘贴导入）："))
+        list_header = QHBoxLayout()
+        list_header.addWidget(QLabel("文件列表（可拖拽 / 粘贴导入）："))
+        list_header.addStretch(1)
+        self.btn_remove = QPushButton("移出选中")
+        self.btn_remove.setToolTip("把选中的文件从列表移出（不删除磁盘文件），Delete 键同效")
+        self.btn_remove.clicked.connect(self.remove_selected)
+        list_header.addWidget(self.btn_remove)
+        self.btn_clear = QPushButton("清空列表")
+        self.btn_clear.setToolTip("清空整个待处理列表（不删除磁盘文件）")
+        self.btn_clear.clicked.connect(self.clear_files)
+        list_header.addWidget(self.btn_clear)
+        left_layout.addLayout(list_header)
+
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self.on_file_context_menu)
         self.file_list.currentRowChanged.connect(self.on_select_file)
+        self.file_list.itemSelectionChanged.connect(self._update_file_buttons)
         left_layout.addWidget(self.file_list, 2)
+
+        # Delete 键快捷移出
+        self.shortcut_delete = QShortcut(QKeySequence.Delete, self.file_list)
+        self.shortcut_delete.activated.connect(self.remove_selected)
 
         self.preview = QLabel("预览区")
         self.preview.setAlignment(Qt.AlignCenter)
@@ -118,6 +140,10 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         root.addWidget(self.progress)
 
+        # 初始化按钮状态
+        self.btn_remove.setEnabled(False)
+        self.btn_clear.setEnabled(False)
+
     # ---------- 文件导入 ----------
     def import_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -157,6 +183,69 @@ class MainWindow(QMainWindow):
             self.file_list.setCurrentRow(0)
         if added:
             self.log(f"已导入 {added} 个文件，共 {len(self.files)} 个")
+        self._update_file_buttons()
+
+    # ---------- 文件移出 ----------
+    def _update_file_buttons(self):
+        has_files = self.file_list.count() > 0
+        self.btn_clear.setEnabled(has_files)
+        self.btn_remove.setEnabled(has_files and len(self.file_list.selectedItems()) > 0)
+
+    def remove_selected(self):
+        """把选中的文件从待处理列表移出（仅移出列表，不删除磁盘文件）。"""
+        rows = sorted(
+            {self.file_list.row(item) for item in self.file_list.selectedItems()},
+            reverse=True,
+        )
+        if not rows:
+            return
+        removed = []
+        for row in rows:
+            removed.append(self.files[row])
+            self.file_list.takeItem(row)
+            del self.files[row]
+        # 移出后重设选中行，触发预览刷新
+        if self.file_list.count() > 0:
+            next_row = min(rows[0], self.file_list.count() - 1)
+            self.file_list.setCurrentRow(next_row)
+            self.on_select_file(next_row)
+        else:
+            self._clear_preview()
+        self.log(f"已移出 {len(removed)} 个文件（未删除磁盘文件）：")
+        for path in removed:
+            self.log(f"  • {os.path.basename(path)}")
+        self._update_file_buttons()
+
+    def clear_files(self):
+        """清空整个待处理列表（仅移出列表，不删除磁盘文件）。"""
+        if not self.file_list.count():
+            return
+        count = self.file_list.count()
+        self.file_list.clear()
+        self.files.clear()
+        self._clear_preview()
+        self.log(f"已清空列表，共移出 {count} 个文件（未删除磁盘文件）")
+        self._update_file_buttons()
+
+    def _clear_preview(self):
+        self.preview.clear()
+        self.preview.setText("预览区")
+        self.preview.setStyleSheet(
+            "border:1px dashed #bbb; background:#fafafa; color:#999;"
+        )
+
+    def on_file_context_menu(self, pos):
+        """文件列表右键菜单：移出选中 / 清空列表。"""
+        menu = QMenu(self)
+        act_remove = menu.addAction("移出选中（Delete）")
+        act_clear = menu.addAction("清空列表")
+        act_remove.setEnabled(len(self.file_list.selectedItems()) > 0)
+        act_clear.setEnabled(self.file_list.count() > 0)
+        chosen = menu.exec(self.file_list.viewport().mapToGlobal(pos))
+        if chosen == act_remove:
+            self.remove_selected()
+        elif chosen == act_clear:
+            self.clear_files()
 
     def on_select_file(self, row: int):
         if row < 0 or row >= len(self.files):
