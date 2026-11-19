@@ -86,6 +86,8 @@ class PreviewDialog(QDialog):
         self.result = result
         self.confirmed = False
         self._image_labels = {}   # item -> (label, size_label) 供刷新
+        self._table_widgets = {}  # id(item) -> QTableWidget，供确认时读回编辑
+        self._text_widgets = {}   # id(item) -> QTextEdit，供确认时读回编辑
         self.setWindowTitle(TASK_TITLES.get(result.task, "预览确认"))
         self.resize(1100, 780)
         self._build_ui()
@@ -200,7 +202,7 @@ class PreviewDialog(QDialog):
         task = self.result.task
 
         if task == "to_excel" and item.table:
-            vbox.addWidget(QLabel("表格识别结果（将导出到 Excel）："))
+            vbox.addWidget(QLabel("表格识别结果（可直接双击单元格修改，改后导出生效）："))
             rows = len(item.table)
             cols = max((len(r) for r in item.table), default=0)
             table_widget = QTableWidget(rows, cols)
@@ -211,12 +213,31 @@ class PreviewDialog(QDialog):
                     text = row[c] if c < len(row) else ""
                     cell = QTableWidgetItem(text)
                     cell.setFont(QFont("Microsoft YaHei", 9))
+                    # 手写体识别可能有误差，空单元格用浅黄底提示需人工补录
+                    if not text.strip():
+                        from PySide6.QtGui import QColor
+                        cell.setBackground(QColor("#fff6d6"))
                     table_widget.setItem(r, c, cell)
             table_widget.resizeColumnsToContents()
+            # 增加行/列按钮，应对漏格、漏行
+            row_col_bar = QHBoxLayout()
+            btn_add_row = QPushButton("＋ 增加一行")
+            btn_add_row.clicked.connect(lambda: self._add_table_row(table_widget))
+            btn_add_col = QPushButton("＋ 增加一列")
+            btn_add_col.clicked.connect(lambda: self._add_table_col(table_widget))
+            row_col_bar.addWidget(btn_add_row)
+            row_col_bar.addWidget(btn_add_col)
+            row_col_bar.addStretch(1)
+            vbox.addLayout(row_col_bar)
             vbox.addWidget(table_widget, 1)
-            note = QLabel("提示：手写体字形识别可能有误差，请核对关键数据。")
-            note.setStyleSheet("color:#c2410c;")
+            note = QLabel(
+                "提示：手写体识别准确率有限。双击任意单元格可直接修改；"
+                "黄色空格为未识别内容，请对照左侧扫描图补录后再导出。"
+            )
+            note.setStyleSheet("color:#c2410c; font-weight:bold;")
+            note.setWordWrap(True)
             vbox.addWidget(note)
+            self._table_widgets[id(item)] = table_widget
 
         elif task == "scan":
             vbox.addWidget(QLabel("文档已矫正为整张纸扫描件（白底、去阴影、去黑点）。"))
@@ -226,28 +247,101 @@ class PreviewDialog(QDialog):
             vbox.addWidget(placeholder, 1)
 
         elif task == "pdf_to_word":
-            vbox.addWidget(QLabel("PDF 文字识别结果："))
+            vbox.addWidget(QLabel("PDF 文字识别结果（可直接编辑，改后导出生效）："))
             text_edit = QTextEdit()
-            text_edit.setReadOnly(True)
+            text_edit.setFont(QFont("Microsoft YaHei", 10))
             for pno, lines in enumerate(item.pdf_pages, 1):
                 text_edit.append(f"===== 第 {pno} 页（{len(lines)} 行）=====")
                 for line in lines:
                     text_edit.append(line["text"])
             vbox.addWidget(text_edit, 1)
+            self._text_widgets[id(item)] = ("pdf", text_edit)
 
         else:
-            # OCR / image_to_word：显示识别文字
-            vbox.addWidget(QLabel(f"识别文字（{len(item.lines)} 行）："))
+            # OCR / image_to_word：显示识别文字（可编辑补正）
+            vbox.addWidget(QLabel(
+                f"识别文字（{len(item.lines)} 行，可直接编辑修改）："))
             text_edit = QTextEdit()
-            text_edit.setReadOnly(True)
             text_edit.setFont(QFont("Microsoft YaHei", 10))
             for line in item.lines:
                 text_edit.append(line["text"])
             vbox.addWidget(text_edit, 1)
+            note = QLabel("提示：手写体识别可能有误，可直接在此修改文字，确认后按修改后的内容导出。")
+            note.setStyleSheet("color:#c2410c;")
+            note.setWordWrap(True)
+            vbox.addWidget(note)
+            self._text_widgets[id(item)] = ("lines", text_edit)
 
         return pane
 
+    @staticmethod
+    def _add_table_row(table_widget: QTableWidget):
+        r = table_widget.rowCount()
+        table_widget.insertRow(r)
+        for c in range(table_widget.columnCount()):
+            cell = QTableWidgetItem("")
+            cell.setFont(QFont("Microsoft YaHei", 9))
+            table_widget.setItem(r, c, cell)
+
+    @staticmethod
+    def _add_table_col(table_widget: QTableWidget):
+        c = table_widget.columnCount()
+        table_widget.insertColumn(c)
+        table_widget.setHorizontalHeaderItem(c, QTableWidgetItem(f"列{c+1}"))
+        for r in range(table_widget.rowCount()):
+            cell = QTableWidgetItem("")
+            cell.setFont(QFont("Microsoft YaHei", 9))
+            table_widget.setItem(r, c, cell)
+
+    def _sync_edits(self):
+        """把用户在预览里的编辑写回 ScanItem，供导出使用。"""
+        for item in self.result.items:
+            tw = self._table_widgets.get(id(item))
+            if tw is not None:
+                table = []
+                for r in range(tw.rowCount()):
+                    row = []
+                    for c in range(tw.columnCount()):
+                        cell = tw.item(r, c)
+                        row.append(cell.text() if cell else "")
+                    table.append(row)
+                item.table = table
+                item.lines = []
+                for row in table:
+                    for text in row:
+                        if text.strip():
+                            item.lines.append({"text": text, "score": 1.0,
+                                               "box": [[0, 0], [0, 0], [0, 0], [0, 0]]})
+                continue
+            entry = self._text_widgets.get(id(item))
+            if entry is not None:
+                kind, text_edit = entry
+                raw = text_edit.toPlainText().splitlines()
+                texts = [t.rstrip() for t in raw if t.strip()]
+                if kind == "pdf":
+                    pages = []
+                    current = None
+                    for t in raw:
+                        if t.startswith("=====") and "页" in t:
+                            if current is not None:
+                                pages.append(current)
+                            current = []
+                        elif current is not None and t.strip():
+                            current.append({"text": t, "score": 1.0,
+                                            "box": [[0, 0], [0, 0], [0, 0], [0, 0]]})
+                    if current is not None:
+                        pages.append(current)
+                    item.pdf_pages = pages
+                else:
+                    item.lines = [
+                        {"text": t, "score": 1.0,
+                         "box": [[0, 0], [0, 0], [0, 0], [0, 0]]}
+                        for t in texts
+                    ]
+
     def _on_confirm(self):
+        # 关键：先把用户在预览中的编辑写回结果，再确认导出
+        self._sync_edits()
         self.confirmed = True
         self.accept()
 

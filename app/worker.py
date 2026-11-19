@@ -61,8 +61,8 @@ class Worker(QThread):
         lines = self.ocr.recognize(gray_scanned)
         if need_table:
             gray = cv2.cvtColor(gray_scanned, cv2.COLOR_BGR2GRAY)
-            table, detected = build_table(gray, lines,
-                                          ocr_engine=self.ocr._get_engine())
+            # 传 OcrEngine 实例（含 recognize_cell 多 preprocessing 融合）
+            table, detected = build_table(gray, lines, ocr_engine=self.ocr)
             item.table = table
             item.table_detected = detected
             item.lines = table_to_lines(table) if detected else lines
