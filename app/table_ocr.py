@@ -29,8 +29,12 @@ def detect_table_lines(gray: np.ndarray):
 
     h_proj = horizontal.sum(axis=1) / 255.0
     v_proj = vertical.sum(axis=0) / 255.0
-    h_lines = _cluster_positions(np.where(h_proj > w * 0.30)[0], min_gap=4)
-    v_lines = _cluster_positions(np.where(v_proj > h * 0.30)[0], min_gap=4)
+    # 阈值自适应：取投影峰值的一定比例，兼容「整张纸」和「裁切表格」两种图
+    # （整张纸里表格线占比小，固定阈值会漏检）
+    h_thresh = max(h_proj.max() * 0.45, w * 0.10)
+    v_thresh = max(v_proj.max() * 0.45, h * 0.10)
+    h_lines = _cluster_positions(np.where(h_proj > h_thresh)[0], min_gap=4)
+    v_lines = _cluster_positions(np.where(v_proj > v_thresh)[0], min_gap=4)
 
     if len(h_lines) < 2 or len(v_lines) < 2:
         return [], []

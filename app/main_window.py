@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QSplitter, QGroupBox, QAbstractItemView, QStatusBar,
 )
 
-from .worker import Worker, IMAGE_EXTS
+from .worker import Worker, export_result, IMAGE_EXTS
+from .preview_dialog import PreviewDialog
 
 APP_TITLE = "ScanMaster 智能文档扫描"
 
@@ -218,31 +219,34 @@ class MainWindow(QMainWindow):
         self.progress.setValue(pct)
         self.statusBar().showMessage(msg)
 
-    def on_finished(self, task: str, data):
+    def on_finished(self, task: str, result):
+        """识别完成 -> 弹预览 -> 用户确认后才导出。"""
         self.progress.setValue(100)
-        self.statusBar().showMessage("处理完成")
-        if task == "ocr":
-            for name, lines in data:
-                self.log(f"\n===== {name}（{len(lines)} 行）=====")
-                for line in lines:
-                    self.log(f"[{line['score']:.2f}] {line['text']}")
-            self.log(f"\n结果文本已保存至: {self.out_dir}")
-            txt_path = os.path.join(self.out_dir, "识别文字.txt")
-            all_text = "\n".join(
-                f"===== {name} =====\n" + "\n".join(l["text"] for l in lines)
-                for name, lines in data
-            )
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(all_text)
-        else:
-            self.log("已生成文件：")
-            for path in data:
-                self.log(f"  • {path}")
-            try:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(self.out_dir))
-            except Exception:
-                pass
-        QMessageBox.information(self, APP_TITLE, "处理完成！")
+        self.statusBar().showMessage("识别完成，等待预览确认")
+
+        dialog = PreviewDialog(result, self)
+        dialog.exec()
+        if not dialog.confirm():
+            self.log("已取消，未导出任何文件。")
+            self.statusBar().showMessage("已取消导出")
+            return
+
+        # 用户确认，执行导出
+        try:
+            saved = export_result(result, self.out_dir)
+        except Exception as exc:
+            self.on_failed(f"导出失败: {exc}")
+            return
+
+        self.log("已导出文件：")
+        for path in saved:
+            self.log(f"  • {path}")
+        self.statusBar().showMessage(f"已导出 {len(saved)} 个文件至 {self.out_dir}")
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.out_dir))
+        except Exception:
+            pass
+        QMessageBox.information(self, APP_TITLE, f"已导出 {len(saved)} 个文件！")
 
     def on_failed(self, error: str):
         self.statusBar().showMessage("处理失败")
