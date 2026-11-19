@@ -51,22 +51,15 @@ def _np_to_pixmap(bgr) -> QPixmap:
 class PreviewDialog(QDialog):
     """识别结果预览。confirm() 返回 True 表示用户确认导出。"""
 
-    def __init__(self, result: ScanResult, parent=None):
-        super().__init__(parent)
-        self.result = result
-        self.confirmed = False
-        self.setWindowTitle(TASK_TITLES.get(result.task, "预览确认"))
-        self.resize(1100, 780)
-        self._build_ui()
-
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
 
-        tip = QLabel("请预览识别结果，确认无误后点击「确认导出」；"
-                     "如需重新识别请点击「取消」。")
-        tip.setStyleSheet("color:#c2410c; font-weight:bold; padding:4px;")
-        root.addWidget(tip)
+        self.tip = QLabel("请预览结果；截取不完整可点每个文件左侧的"
+                          "「手工调整裁剪」拖动四角重新框选，确认无误再导出。")
+        self.tip.setStyleSheet("color:#c2410c; font-weight:bold; padding:4px;")
+        self.tip.setWordWrap(True)
+        root.addWidget(self.tip)
 
         tabs = QTabWidget()
         for item in self.result.items:
@@ -88,6 +81,15 @@ class PreviewDialog(QDialog):
         btn_box.addWidget(btn_ok)
         root.addLayout(btn_box)
 
+    def __init__(self, result: ScanResult, parent=None):
+        super().__init__(parent)
+        self.result = result
+        self.confirmed = False
+        self._image_labels = {}   # item -> (label, size_label) 供刷新
+        self.setWindowTitle(TASK_TITLES.get(result.task, "预览确认"))
+        self.resize(1100, 780)
+        self._build_ui()
+
     def _make_item_widget(self, item: ScanItem) -> QWidget:
         """单个文件的预览页：左侧扫描图 + 右侧识别内容。"""
         widget = QWidget()
@@ -108,27 +110,89 @@ class PreviewDialog(QDialog):
     def _make_image_pane(self, item: ScanItem) -> QWidget:
         pane = QWidget()
         vbox = QVBoxLayout(pane)
-        vbox.addWidget(QLabel("扫描图预览："))
+        header = QHBoxLayout()
+        header.addWidget(QLabel("扫描图预览："))
+        header.addStretch(1)
+        btn_adjust = QPushButton("✂ 手工调整裁剪")
+        btn_adjust.setToolTip("截取不完整时，在原图上手动拖动四角重新框选")
+        btn_adjust.clicked.connect(lambda: self._on_adjust(item))
+        # PDF 没有单张原图可调整，禁用
+        btn_adjust.setEnabled(bool(item.source_path) and
+                               not item.source_path.lower().endswith(".pdf"))
+        header.addWidget(btn_adjust)
+        vbox.addLayout(header)
+
         label = QLabel("无图像")
         label.setAlignment(Qt.AlignCenter)
-        pixmap = _np_to_pixmap(item.scanned)
-        if not pixmap.isNull():
-            # 缩放到面板大小，保持比例
-            scaled = pixmap.scaled(
-                520, 700, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            label.setPixmap(scaled)
-            label.setToolTip(f"原始尺寸: {pixmap.width()} x {pixmap.height()}")
         scroll = QScrollArea()
         scroll.setWidget(label)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("background:#f0f0f0;")
         vbox.addWidget(scroll, 1)
-        if not pixmap.isNull():
-            size_label = QLabel(
-                f"尺寸: {pixmap.width()} × {pixmap.height()} px（保留整张纸）")
-            size_label.setStyleSheet("color:#666;")
-            vbox.addWidget(size_label)
+        size_label = QLabel("")
+        size_label.setStyleSheet("color:#666;")
+        vbox.addWidget(size_label)
+
+        self._image_labels[id(item)] = (label, size_label)
+        self._refresh_image(item)
         return pane
+
+    def _refresh_image(self, item: ScanItem):
+        """根据 item.scanned 刷新预览标签。"""
+        label, size_label = self._image_labels.get(id(item), (None, None))
+        if label is None:
+            return
+        pixmap = _np_to_pixmap(item.scanned)
+        if pixmap.isNull():
+            label.setText("无图像")
+            size_label.setText("")
+            return
+        scaled = pixmap.scaled(
+            520, 700, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(scaled)
+        label.setToolTip(f"原始尺寸: {pixmap.width()} x {pixmap.height()}")
+        size_label.setText(
+            f"尺寸: {pixmap.width()} × {pixmap.height()} px（保留整张纸）")
+
+    def _on_adjust(self, item: ScanItem):
+        """弹出手动裁剪编辑器，用新四角重新矫正并刷新预览。"""
+        import os
+        from PySide6.QtWidgets import QMessageBox
+        from .scanner import DocumentScanner
+        from .crop_dialog import CropDialog
+
+        if not item.source_path or not os.path.isfile(item.source_path):
+            QMessageBox.information(self, "手工调整", "找不到原始图片，无法调整。")
+            return
+        # 读取原图（中文路径用 fromfile）
+        import numpy as np
+        import cv2
+        data = np.fromfile(item.source_path, dtype=np.uint8)
+        original = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if original is None:
+            QMessageBox.information(self, "手工调整", "原图读取失败。")
+            return
+
+        scanner = DocumentScanner()
+        # 初始四角：优先用上次调整结果，否则自动检测
+        initial = item.manual_quad
+        if initial is None:
+            initial = scanner.detect_quad(original, full_page=True)
+        dlg = CropDialog(original, initial, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        quad = dlg.get_quad()
+        try:
+            warped = scanner.warp_by_quad(original, quad)
+            scanned = scanner.enhance_scan(warped)
+        except Exception as exc:
+            QMessageBox.critical(self, "手工调整", f"重新矫正失败：{exc}")
+            return
+        item.scanned = scanned
+        item.manual_quad = quad
+        self._refresh_image(item)
+        self.tip.setText("✓ 已应用手工裁剪，确认无误后点「确认导出」；"
+                         "仍可再次点「手工调整裁剪」微调。")
 
     def _make_content_pane(self, item: ScanItem) -> QWidget:
         pane = QWidget()

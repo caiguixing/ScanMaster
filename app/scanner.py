@@ -135,7 +135,8 @@ class DocumentScanner:
         expanded[:, 1] = np.clip(expanded[:, 1], 0, h - 1)
         return expanded.astype("float32")
 
-    def _denoise_binarize(self, gray: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _denoise_binarize(gray: np.ndarray) -> np.ndarray:
         """去阴影 + 去黑点 + 二值化，得到夸克式干净白底黑字。
 
         关键：先用形态学开运算去除孤立噪点，再做自适应阈值，
@@ -161,54 +162,86 @@ class DocumentScanner:
         cleaned = cv2.dilate(cleaned, kernel2, iterations=1)
         return cleaned
 
+    def detect_quad(self, image: np.ndarray, full_page: bool = True):
+        """检测纸张四角，返回原图坐标系下的 [左上,右上,右下,左下]。
+
+        供手动裁剪编辑器获取初始四角；返回 None 表示检测失败。
+        """
+        if image is None or image.size == 0:
+            return None
+        small, scale = self._resize(image)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        quad = self._find_paper_quad(gray, content_only=not full_page)
+        if quad is None:
+            return None
+        rect = self._order_points(quad / scale)
+        if full_page:
+            rect = self._expand_to_paper(rect, image.shape[:2])
+        return rect.astype("float32")
+
+    @staticmethod
+    def warp_by_quad(image: np.ndarray, rect: np.ndarray) -> np.ndarray:
+        """按指定四角（原图坐标）做透视变换拉正，不做增强。"""
+        rect = np.asarray(rect, dtype="float32")
+        tl, tr, br, bl = rect
+        width_a = np.linalg.norm(br - bl)
+        width_b = np.linalg.norm(tr - tl)
+        height_a = np.linalg.norm(tr - br)
+        height_b = np.linalg.norm(tl - bl)
+        max_w = int(max(width_a, width_b))
+        max_h = int(max(height_a, height_b))
+        if not (100 <= max_w <= 20000 and 100 <= max_h <= 20000):
+            return image.copy()
+        dst = np.array([[0, 0], [max_w - 1, 0],
+                        [max_w - 1, max_h - 1], [0, max_h - 1]],
+                       dtype="float32")
+        matrix = cv2.getPerspectiveTransform(rect, dst)
+        return cv2.warpPerspective(image, matrix, (max_w, max_h))
+
+    @staticmethod
+    def enhance_scan(work: np.ndarray) -> np.ndarray:
+        """把已拉正的图去阴影/去黑点/二值化，得到干净扫描件。"""
+        if work.ndim == 3:
+            work_gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+        else:
+            work_gray = work
+        binary = DocumentScanner._denoise_binarize(work_gray)
+        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
     def scan(self, image: np.ndarray, enhance: bool = True,
-             full_page: bool = True) -> np.ndarray:
+             full_page: bool = True,
+             manual_quad: np.ndarray | None = None) -> np.ndarray:
         """矫正单张图片。
 
         Args:
             enhance: True 输出去阴影二值化的干净扫描件；False 保留灰度供 OCR
             full_page: True 检测整张纸（含页眉页脚，A4 比例）；
                        False 检测内容/表格区域（紧凑，利于表格线检测与 OCR）
+            manual_quad: 手动指定的四角（原图坐标），提供时跳过自动检测
         """
         if image is None or image.size == 0:
             raise ValueError("图片为空，无法扫描")
 
         original = image.copy()
-        small, scale = self._resize(original)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-
-        quad = self._find_paper_quad(gray, content_only=not full_page)
-        if quad is None:
-            work = original
+        if manual_quad is not None:
+            rect = np.asarray(manual_quad, dtype="float32")
+            work = self.warp_by_quad(original, rect)
         else:
-            pts = quad / scale
-            rect = self._order_points(pts)
-            # 只有输出整张纸扫描件时才外扩 + A4 校正；
-            # OCR/表格识别用紧凑内容区，避免拉伸导致表格线模糊
-            if full_page:
-                rect = self._expand_to_paper(rect, original.shape[:2])
-            tl, tr, br, bl = rect
-            width_a = np.linalg.norm(br - bl)
-            width_b = np.linalg.norm(tr - tl)
-            height_a = np.linalg.norm(tr - br)
-            height_b = np.linalg.norm(tl - bl)
-            max_w = int(max(width_a, width_b))
-            max_h = int(max(height_a, height_b))
-            if not (100 <= max_w <= 20000 and 100 <= max_h <= 20000):
+            small, scale = self._resize(original)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            quad = self._find_paper_quad(gray, content_only=not full_page)
+            if quad is None:
                 work = original
             else:
-                dst = np.array([[0, 0], [max_w - 1, 0],
-                                [max_w - 1, max_h - 1], [0, max_h - 1]],
-                               dtype="float32")
-                matrix = cv2.getPerspectiveTransform(rect, dst)
-                work = cv2.warpPerspective(original, matrix, (max_w, max_h))
+                rect = self._order_points(quad / scale)
+                # 仅整张纸扫描件外扩 + A4 校正；OCR 用紧凑内容区避免表格线模糊
+                if full_page:
+                    rect = self._expand_to_paper(rect, original.shape[:2])
+                work = self.warp_by_quad(original, rect)
 
         if not enhance:
             return work
-
-        work_gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-        binary = self._denoise_binarize(work_gray)
-        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        return self.enhance_scan(work)
 
 
 def to_bgr(pil_image) -> np.ndarray:

@@ -15,6 +15,7 @@ class ScanItem:
         self.table_detected: bool = False
         self.lines: List[Dict] = []                  # OCR 文字行
         self.pdf_pages: List[List[Dict]] = []        # PDF 每页文字
+        self.manual_quad = None                      # 手工调整后的四角（原图坐标）
 
 
 class ScanResult:
